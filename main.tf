@@ -8,6 +8,8 @@ resource "aws_internet_gateway" "main" {
 }
 
 # Public Subnets
+# tfsec:ignore:aws-ec2-no-public-ip-subnet
+# Required so the ALB (in this public subnet) is internet-reachable.
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.main.id
   cidr_block               = "10.0.1.0/24"
@@ -19,6 +21,8 @@ resource "aws_subnet" "public_a" {
   }
 }
 
+# tfsec:ignore:aws-ec2-no-public-ip-subnet
+# Required so the ALB (in this public subnet) is internet-reachable.
 resource "aws_subnet" "public_b" {
   vpc_id                  = aws_vpc.main.id
   cidr_block               = "10.0.2.0/24"
@@ -119,6 +123,8 @@ resource "aws_route_table_association" "private_b" {
   route_table_id = aws_route_table.private.id
 }
 
+# tfsec:ignore:aws-ec2-require-vpc-flow-logs-for-all-vpcs
+# Flow Logs would add ongoing CloudWatch Logs cost; out of scope for this portfolio demo.
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
@@ -135,6 +141,8 @@ resource "aws_security_group" "alb" {
   description = "Allow HTTP traffic to ALB"
   vpc_id      = aws_vpc.main.id
 
+  # tfsec:ignore:aws-ec2-no-public-ingress-sgr
+  # Portfolio demo: ALB is intentionally internet-facing on port 80.
   ingress {
     description = "HTTP from internet"
     from_port   = 80
@@ -142,8 +150,10 @@ resource "aws_security_group" "alb" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
+  # tfsec:ignore:aws-ec2-no-public-egress-sgr
+  # Outbound traffic left open for OS/package updates on the instances.
   egress {
+    description = "Allow all outbound traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -169,7 +179,10 @@ resource "aws_security_group" "ec2" {
     security_groups  = [aws_security_group.alb.id]
   }
 
+  # tfsec:ignore:aws-ec2-no-public-egress-sgr
+  # Outbound traffic left open for OS/package updates on the instances.
   egress {
+    description = "Allow all outbound traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -199,6 +212,11 @@ resource "aws_launch_template" "app" {
   instance_type = "t3.micro"
 
   vpc_security_group_ids = [aws_security_group.ec2.id]
+
+  metadata_options {
+    http_tokens   = "required"
+    http_endpoint = "enabled"
+  }
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
@@ -244,12 +262,15 @@ resource "aws_autoscaling_group" "app" {
 }
 
 # Application Load Balancer
+# tfsec:ignore:aws-elb-alb-not-public
+# Portfolio demo: ALB is intentionally public-facing to serve the web app.
 resource "aws_lb" "app" {
-  name               = "aws-self-healing-infra-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  name                       = "aws-self-healing-infra-alb"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb.id]
+  subnets                    = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  drop_invalid_header_fields = true
 
   tags = {
     Name = "aws-self-healing-infra-alb"
@@ -277,6 +298,9 @@ resource "aws_lb_target_group" "app" {
 }
 
 # Listener
+# tfsec:ignore:aws-elb-http-not-used
+# Portfolio demo: no domain/ACM certificate provisioned, so HTTPS is out of
+# scope. In production this listener would redirect to a 443 HTTPS listener.
 resource "aws_lb_listener" "app" {
   load_balancer_arn = aws_lb.app.arn
   port              = 80
@@ -302,7 +326,10 @@ resource "aws_security_group" "rds" {
     security_groups  = [aws_security_group.ec2.id]
   }
 
+  # tfsec:ignore:aws-ec2-no-public-egress-sgr
+  # Outbound traffic left open; RDS has no internet-facing inbound access.
   egress {
+    description = "Allow all outbound traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -351,7 +378,8 @@ resource "aws_db_instance" "main" {
 
 # SNS Topic for alerts
 resource "aws_sns_topic" "alerts" {
-  name = "aws-self-healing-infra-alerts"
+  name              = "aws-self-healing-infra-alerts"
+  kms_master_key_id = "alias/aws/sns"
 }
 
 resource "aws_sns_topic_subscription" "email" {
