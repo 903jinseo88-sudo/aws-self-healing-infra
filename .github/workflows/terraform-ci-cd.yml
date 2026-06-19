@@ -62,10 +62,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install tfsec
+        run: |
+          curl -s -L https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
       - name: Run tfsec
-        uses: docker://aquasec/tfsec:latest
-        with:
-          args: .
+        run: tfsec .
 
   apply:
     name: Terraform Apply
