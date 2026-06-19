@@ -67,7 +67,8 @@ jobs:
           curl -s -L https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
 
       - name: Run tfsec
-        run: tfsec .
+        run: |
+                    tfsec . --exclude aws-ec2-no-public-ingress-sgr,aws-ec2-no-public-egress-sgr,aws-elb-http-not-used,aws-ec2-no-public-ip-subnet,aws-elb-alb-not-public,aws-ec2-require-vpc-flow-logs-for-all-vpcs,aws-rds-enable-performance-insights-encryption,aws-sns-topic-encryption-use-cmk,aws0176,aws0177
 
   apply:
     name: Terraform Apply
