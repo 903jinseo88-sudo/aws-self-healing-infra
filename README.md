@@ -1,6 +1,6 @@
 # Self-Healing 3-Tier Web Infrastructure on AWS
 
-A production-style AWS infrastructure project built entirely with Terraform, designed to automatically detect and recover from instance failure with zero downtime. Every resource was deployed, tested, and torn down using Infrastructure as Code — no manual console clicks.
+A production-style AWS infrastructure project built entirely with Terraform, designed to automatically detect and recover from instance failure with zero downtime — and deployed through a CI/CD pipeline with an automated security gate and a manual approval step before anything reaches production. Every resource was deployed, tested, and torn down using Infrastructure as Code — no manual console clicks.
 
 ## Architecture
 
@@ -27,6 +27,17 @@ A production-style AWS infrastructure project built entirely with Terraform, des
        CloudWatch Alarms ──► SNS ──► Email Notification
 ```
 
+```
+GitHub Actions CI/CD
+  push to main / pull_request
+        │
+        ▼
+  terraform plan ──► tfsec security scan ──► manual approval (production env) ──► terraform apply
+                            │                         │
+                       blocks on findings      required reviewer, main-branch only,
+                                                admin bypass disabled
+```
+
 ## What This Project Demonstrates
 
 **Scenario:** an EC2 instance behind the load balancer becomes unhealthy or is terminated unexpectedly.
@@ -40,25 +51,73 @@ A production-style AWS infrastructure project built entirely with Terraform, des
 
 This was not just configured — it was tested by force-terminating a live, healthy instance and observing the full recovery loop end-to-end. See [Disaster Recovery Test](#disaster-recovery-test) below.
 
+**Scenario two:** infrastructure changes are now deployed through a pipeline, not a laptop.
+
+1. A change is pushed to `main` (or opened as a pull request)
+2. GitHub Actions authenticates to AWS via OIDC — no long-lived access keys stored anywhere
+3. `terraform plan` runs against remote state (S3 + DynamoDB locking)
+4. `tfsec` scans the plan for security misconfigurations and **blocks the pipeline** if it finds any
+5. If the scan passes, the pipeline pauses and waits for manual approval in the `production` GitHub environment
+6. Only after a human approves does `terraform apply` run, applying the exact plan that was reviewed
+
+This was tested by deliberately introducing a real vulnerability (an RDS security group opened to `0.0.0.0/0`) on a pull request and confirming the pipeline caught it and refused to proceed. See [CI/CD Pipeline & Security Gate](#cicd-pipeline--security-gate) below.
+
 ## Infrastructure Components
 
 | Layer | Service | Configuration |
 |---|---|---|
 | Network | VPC | `10.0.0.0/16`, 2 public + 2 private subnets across 2 AZs |
 | Network | Internet Gateway / NAT Gateway | Public subnets route via IGW, private subnets via NAT |
-| Compute | EC2 (Auto Scaling Group) | Amazon Linux 2023, min 2 / max 4, t3.micro |
-| Load Balancing | Application Load Balancer | HTTP listener, health checks every 15s |
-| Database | RDS (MySQL 8.0) | Private subnets only, no public access, t3.micro |
+| Compute | EC2 (Auto Scaling Group) | Amazon Linux 2023, min 2 / max 4, t3.micro, IMDSv2 enforced |
+| Load Balancing | Application Load Balancer | HTTP listener, health checks every 15s, invalid headers dropped |
+| Database | RDS (MySQL 8.0) | Private subnets only, no public access, t3.micro, encrypted, deletion protection enabled |
 | Monitoring | CloudWatch Alarms | Unhealthy host count, CPU utilization |
-| Alerting | SNS | Email notifications on alarm/recovery |
-| IaC | Terraform | All resources defined as code, fully reproducible |
+| Alerting | SNS | Email notifications on alarm/recovery, encrypted topic |
+| IaC | Terraform | All resources defined as code, fully reproducible, remote state in S3 + DynamoDB |
+| CI/CD | GitHub Actions | OIDC auth, tfsec security gate, manual approval before apply |
 
 ## Security Design
 
+**Network & access:**
 - EC2 instances live in **private subnets** — no direct internet access, no public IP
 - RDS is **not publicly accessible** and only reachable from EC2 on port 3306
 - Security groups follow least privilege: ALB accepts HTTP from the internet, EC2 only accepts traffic from the ALB's security group, RDS only accepts traffic from EC2's security group
-- Database credentials are passed as a sensitive Terraform variable, never hardcoded or committed to version control
+- Database credentials are passed as a sensitive Terraform variable / GitHub Secret, never hardcoded or committed to version control
+- EC2 launch template enforces **IMDSv2** (token-required metadata access)
+
+**Pipeline & deployment:**
+- AWS authentication uses **OIDC**, not static access keys — GitHub issues a short-lived token scoped to this exact repository and branch
+- The IAM role's trust policy and permission policy are both scoped to the minimum needed (specific AWS services, specific S3 bucket, specific DynamoDB table — not `AdministratorAccess`)
+- The `production` GitHub environment requires a human reviewer, restricts deployment to the `main` branch only, and has **admin bypass explicitly disabled** — the approval step cannot be skipped, even by the repo owner
+
+## CI/CD Pipeline & Security Gate
+
+Infrastructure changes go through a three-stage GitHub Actions pipeline (`.github/workflows/terraform-ci-cd.yml`):
+
+1. **`terraform plan`** — runs against remote state, uploads the plan as an artifact
+2. **`tfsec` security scan** — runs `tfsec` directly as a shell step (not a wrapper action — see note below) and fails the pipeline on any finding
+3. **`terraform apply`** — only runs if both prior stages pass, downloads the exact reviewed plan artifact, and requires manual approval through the `production` environment before executing
+
+**Proving the gate actually works:** I deliberately opened a pull request that exposed the RDS security group to `0.0.0.0/0` instead of restricting it to the application tier. The pipeline's `tfsec` scan caught it immediately:
+
+```
+ID: aws-ec2-no-public-ingress-sgr
+Impact: Your port exposed to the internet
+main.tf:151 — cidr_blocks = ["0.0.0.0/0"]
+```
+
+Because `terraform apply` depends on the scan passing, it never ran — the vulnerable configuration never reached AWS. The PR was closed without merging.
+
+**A note on tooling:** getting `tfsec` to reliably fail the pipeline took more debugging than expected. The popular `aquasecurity/tfsec-action` reported success even when tfsec's own output showed 21 findings — its `soft_fail: false` input wasn't reliably propagating the exit code. The fix was to install and run the `tfsec` binary directly as a shell step, so GitHub Actions reads the real process exit code with no wrapper in between. This kind of "the tool isn't doing what the docs say it does" debugging is, in my experience, a normal and underrated part of building CI/CD — not a sign something was set up wrong.
+
+**Triage, not just suppression:** running `tfsec` for real surfaced 20 pre-existing findings across the whole codebase, unrelated to the intentional demo bug. Each was individually reviewed:
+
+| Disposition | Count | Examples |
+|---|---|---|
+| Fixed in code | 7 | RDS storage encryption, IMDSv2 enforcement, ALB invalid-header dropping, RDS backup retention, RDS performance insights, SNS topic encryption, security group rule descriptions |
+| Accepted risk (documented, excluded) | 13 | ALB intentionally public-facing, HTTP listener (no domain/ACM cert in scope), VPC Flow Logs (cost), SNS customer-managed key (cost/complexity) |
+
+The accepted-risk items are excluded via a `--exclude` list in the workflow (or enabled directly where Rego-based checks didn't respond to standard exclude syntax), each with a one-line reason in the code or workflow file — the goal being to show deliberate trade-offs, not blind suppression.
 
 ## Disaster Recovery Test
 
@@ -76,32 +135,43 @@ Full write-up with screenshots and terminal output: [AWS Self-Healing Infrastruc
 
 ```
 .
-├── main.tf          # All AWS resources (VPC, subnets, ALB, ASG, RDS, CloudWatch, SNS)
-├── variables.tf     # Input variables (region, db password, alert email)
-├── outputs.tf       # Useful outputs (VPC ID, ALB DNS name, RDS endpoint)
-├── provider.tf      # Terraform + AWS provider configuration
+├── main.tf                            # All AWS resources (VPC, subnets, ALB, ASG, RDS, CloudWatch, SNS)
+├── variables.tf                       # Input variables (region, db password, alert email)
+├── outputs.tf                         # Useful outputs (VPC ID, ALB DNS name, RDS endpoint)
+├── provider.tf                        # Terraform + AWS provider configuration, S3 remote backend
+├── .github/workflows/terraform-ci-cd.yml  # CI/CD pipeline: plan → tfsec → manual approval → apply
 └── README.md
 ```
 
 ## Running This Project
 
+**Locally:**
 ```bash
 terraform init
 terraform plan
 terraform apply
 ```
 
-You will be prompted for `db_password` and `alert_email` (both marked sensitive, not stored in the repo).
+You will be prompted for `db_password` and `alert_email` (both marked sensitive, not stored in the repo). Remote state is stored in S3 with DynamoDB locking, so this is safe to run alongside the CI/CD pipeline.
 
-To tear down all resources:
+**Via the pipeline:** push a change to `main` (or open a pull request to preview the plan and security scan). After `plan` and the `tfsec` scan pass, approve the deployment in the `production` GitHub environment to apply.
+
+**To tear down all resources:**
+
+RDS has deletion protection enabled, so it must be disabled first:
 
 ```bash
+aws rds modify-db-instance \
+  --db-instance-identifier aws-self-healing-infra-db \
+  --no-deletion-protection \
+  --apply-immediately
+
 terraform destroy
 ```
 
 ## Tech Stack
 
-AWS (VPC, EC2, Auto Scaling, ALB, RDS, CloudWatch, SNS, IAM) · Terraform · Amazon Linux 2023
+AWS (VPC, EC2, Auto Scaling, ALB, RDS, CloudWatch, SNS, IAM, OIDC) · Terraform (S3 + DynamoDB remote state) · GitHub Actions · tfsec · Amazon Linux 2023
 
 ## Author
 
