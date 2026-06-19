@@ -352,8 +352,6 @@ resource "aws_db_subnet_group" "main" {
 }
 
 # RDS Instance
-#tfsec:ignore:aws-rds-iam-authentication-enabled
-#tfsec:ignore:aws-rds-enable-deletion-protection
 resource "aws_db_instance" "main" {
   identifier             = "aws-self-healing-infra-db"
   engine                 = "mysql"
@@ -362,6 +360,7 @@ resource "aws_db_instance" "main" {
   allocated_storage      = 20
   storage_type           = "gp3"
   storage_encrypted      = true
+  iam_database_authentication_enabled = true
 
   db_name                = "appdb"
   username               = "admin"
