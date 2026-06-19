@@ -44,3 +44,4 @@ terraform.rc
 # planouttrust-policy.json
 terraform-deploy-policy.json
 .DS_Store
+trust-policy.json
