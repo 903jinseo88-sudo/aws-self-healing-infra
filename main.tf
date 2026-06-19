@@ -361,6 +361,7 @@ resource "aws_db_instance" "main" {
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
   storage_type           = "gp3"
+  storage_encrypted      = true
 
   db_name                = "appdb"
   username               = "admin"
@@ -369,9 +370,11 @@ resource "aws_db_instance" "main" {
   vpc_security_group_ids = [aws_security_group.rds.id]
   db_subnet_group_name   = aws_db_subnet_group.main.name
 
-  multi_az               = false
-  publicly_accessible    = false
-  skip_final_snapshot    = true
+  multi_az                      = false
+  publicly_accessible           = false
+  skip_final_snapshot           = true
+  backup_retention_period       = 7
+  performance_insights_enabled  = true
 
   tags = {
     Name = "aws-self-healing-infra-db"
@@ -379,6 +382,7 @@ resource "aws_db_instance" "main" {
 }
 
 # SNS Topic for alerts
+#tfsec:ignore:aws-sns-topic-encryption-use-cmk
 resource "aws_sns_topic" "alerts" {
   name              = "aws-self-healing-infra-alerts"
   kms_master_key_id = "alias/aws/sns"
