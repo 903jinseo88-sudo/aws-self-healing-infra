@@ -374,6 +374,7 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot           = true
   backup_retention_period       = 7
   performance_insights_enabled  = true
+  deletion_protection		= true
 
   tags = {
     Name = "aws-self-healing-infra-db"
