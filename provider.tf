@@ -7,11 +7,16 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  backend "s3" {
+    bucket         = "jinseo-tf-state-aws-self-healing-infra"
+    key            = "terraform.tfstate"
+    region         = "ap-southeast-1"
+    dynamodb_table = "terraform-lock-aws-self-healing-infra"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
   region = var.aws_region
 }
-
-
-
