@@ -114,10 +114,39 @@ Because `terraform apply` depends on the scan passing, it never ran — the vuln
 
 | Disposition | Count | Examples |
 |---|---|---|
-| Fixed in code | 7 | RDS storage encryption, IMDSv2 enforcement, ALB invalid-header dropping, RDS backup retention, RDS performance insights, SNS topic encryption, security group rule descriptions |
-| Accepted risk (documented, excluded) | 13 | ALB intentionally public-facing, HTTP listener (no domain/ACM cert in scope), VPC Flow Logs (cost), SNS customer-managed key (cost/complexity) |
+| Fixed in code | 7 | IMDSv2 enforcement, ALB invalid-header dropping, RDS backup retention, RDS performance insights, SNS topic encryption, security group rule descriptions, SNS customer-managed KMS key |
+| Accepted risk (documented, excluded) | 12 | ALB intentionally public-facing, HTTP listener (no domain/ACM cert in scope), VPC Flow Logs (cost) |
+| Known drift (code-vs-live, deferred) | 1 | RDS storage encryption — code requires it, but the live instance predates the change; applying it forces a destroy-and-recreate, so it's tracked as a planned migration rather than silently applied (see Known Issues below) |
+
+> Note: the SNS topic's KMS key was originally an AWS-managed key, accepted as a cost/complexity trade-off. It was later replaced with a customer-managed key in Phase 13 after discovering that CloudWatch Alarms couldn't be granted publish permissions on the AWS-managed key — see Auto-Remediation below.
 
 The accepted-risk items are excluded via a `--exclude` list in the workflow (or enabled directly where Rego-based checks didn't respond to standard exclude syntax), each with a one-line reason in the code or workflow file — the goal being to show deliberate trade-offs, not blind suppression.
+
+## Monitoring & Log Analysis
+
+The ALB's access logs are delivered to a dedicated, encrypted S3 bucket (public access blocked, 30-day lifecycle expiration) and queried through an Amazon Athena external table built on a regex SerDe.
+
+Five operational queries cover the kind of first-line diagnostic questions a Cloud Support engineer is typically asked to answer:
+
+- 5xx error rate by hour
+- Slowest requests (Top 10 by target processing time)
+- Request volume by client IP / user agent
+- Status code distribution (2xx / 4xx / 5xx)
+- Average / max latency by URL
+
+This closes a gap that pure auto-healing doesn't cover: instance-level health checks and alarms tell you *that* something failed, but not *what actually happened* during an incident. Querying real traffic also surfaced unsolicited scanning traffic from external IPs hitting the public ALB — a reminder that this is internet-facing infrastructure, and a candidate for future WAF rules or IP allow-listing in a production setting.
+
+## Auto-Remediation (Lambda)
+
+A Lambda function, triggered via the existing `unhealthy_hosts` CloudWatch alarm through SNS, adds a lighter-weight response option ahead of full Auto Scaling instance replacement:
+
+1. On an `ALARM` state transition, the function queries the ALB target group for unhealthy/draining instances.
+2. Each unhealthy instance is rebooted via the EC2 API — unless it's within a 10-minute cooldown window (tracked in DynamoDB per instance ID), which prevents repeated reboots on consecutive alarm evaluations.
+3. The result is published back to the same SNS topic for visibility. A guard clause ensures the function ignores its own follow-up notification rather than treating it as a new alarm and re-triggering itself.
+
+**Troubleshooting note:** the first end-to-end test failed silently — CloudWatch Alarms couldn't publish to the SNS topic because the topic was encrypted with an AWS-managed KMS key, which can't be granted explicit cross-service publish permissions. Replacing it with a customer-managed key (with an explicit key policy for `cloudwatch.amazonaws.com` and `sns.amazonaws.com`) fixed alarm delivery, but a second test then failed at the final notification step — the Lambda's own IAM role also needed `kms:GenerateDataKey`/`kms:Decrypt` on that key, since a service principal's key policy permissions don't extend to a role acting on that service's behalf. A third test run completed end to end with no errors, correctly distinguishing newly-unhealthy instances (`REBOOTED`) from ones still in cooldown (`SKIPPED`).
+
+**Known limitation:** after a successful reboot, the ALB target group continued reporting the instance as unhealthy (`Target.Timeout`) for roughly 60–90 seconds even though EC2/ASG considered it fully healthy — the health check's timing is tighter than the time Apache needs to fully restart and start responding. This resolved on its own, but a tighter fix would be tuning the health check's `unhealthy_threshold`/`interval`, or adding a short post-reboot grace period to the Lambda's logic.
 
 ## Disaster Recovery Test
 
@@ -171,7 +200,7 @@ terraform destroy
 
 ## Tech Stack
 
-AWS (VPC, EC2, Auto Scaling, ALB, RDS, CloudWatch, SNS, IAM, OIDC) · Terraform (S3 + DynamoDB remote state) · GitHub Actions · tfsec · Amazon Linux 2023
+AWS (VPC, EC2, Auto Scaling, ALB, RDS, CloudWatch, SNS, IAM, OIDC, Lambda, DynamoDB, KMS, Athena) · Terraform (S3 + DynamoDB remote state) · GitHub Actions · tfsec · Amazon Linux 2023 · Python (boto3) · SQL
 
 ## Author
 
