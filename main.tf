@@ -267,6 +267,9 @@ resource "aws_autoscaling_group" "app" {
 # -----------------------------
 data "aws_caller_identity" "current" {}
 
+#tfsec:ignore:aws-s3-enable-bucket-logging
+# This bucket *is* the log destination (ALB access logs). Logging access to
+# the log bucket itself adds cost/complexity with little portfolio value.
 resource "aws_s3_bucket" "alb_logs" {
   bucket = "${local.name_prefix}-alb-logs-${data.aws_caller_identity.current.account_id}"
 
@@ -295,6 +298,27 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
 
     expiration {
       days = 30
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+#tfsec:ignore:aws-s3-encryption-customer-key
+# ALB access log delivery only supports SSE-S3 (AES256), not SSE-KMS:
+# https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
     }
   }
 }
@@ -455,7 +479,11 @@ resource "aws_db_instance" "main" {
   multi_az                     = false
   publicly_accessible          = false
   skip_final_snapshot          = true
-  backup_retention_period      = 1
+  backup_retention_period = 7
+
+  #tfsec:ignore:aws-rds-enable-performance-insights
+  # Toggling this on a live RDS instance can trigger a reboot; deferring to
+  # avoid a prod restart for a LOW-severity monitoring nice-to-have.
   performance_insights_enabled = false
   deletion_protection          = true
 
@@ -526,6 +554,9 @@ data "archive_file" "auto_remediation" {
   output_path = "${path.module}/lambda/auto_remediation.zip"
 }
 
+#tfsec:ignore:aws-dynamodb-table-customer-key
+# This table only holds transient remediation-cooldown timestamps (no
+# sensitive data); AWS-owned default encryption is sufficient here.
 resource "aws_dynamodb_table" "remediation_cooldown" {
   name         = "${local.name_prefix}-remediation-cooldown"
   billing_mode = "PAY_PER_REQUEST"
@@ -534,6 +565,14 @@ resource "aws_dynamodb_table" "remediation_cooldown" {
   attribute {
     name = "instance_id"
     type = "S"
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  point_in_time_recovery {
+    enabled = true
   }
 
   tags = {
@@ -615,6 +654,15 @@ resource "aws_iam_role_policy" "lambda_remediation" {
           "logs:PutLogEvents"
         ]
         Resource = "arn:aws:logs:ap-southeast-1:${data.aws_caller_identity.current.account_id}:*"
+      },
+      {
+        Sid    = "XRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
+        ]
+        Resource = "*"
       }
     ]
   })
@@ -636,6 +684,10 @@ resource "aws_lambda_function" "auto_remediation" {
       SNS_TOPIC_ARN    = aws_sns_topic.alerts.arn
       COOLDOWN_MINUTES = "10"
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   tags = {
@@ -663,6 +715,7 @@ resource "aws_sns_topic_subscription" "lambda_remediation" {
 resource "aws_kms_key" "sns" {
   description             = "KMS key for SNS topic encryption (${local.name_prefix}-alerts)"
   deletion_window_in_days = 7
+  enable_key_rotation     = true
 
   policy = jsonencode({
     Version = "2012-10-17"
