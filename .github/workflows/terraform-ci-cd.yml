@@ -3,10 +3,15 @@ name: Terraform CI/CD
 on:
   push:
     branches:
-      - main
+      - main      # -> prod (manual approval)
+      - staging   # -> staging (auto-apply)
+      - develop   # -> dev (auto-apply)
   pull_request:
     branches:
       - main
+      - staging
+      - develop
+
 permissions:
   id-token: write
   contents: read
@@ -17,9 +22,28 @@ env:
   TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
 
 jobs:
-  plan:
-    name: Terraform Plan
+  # Map the branch that triggered this run to a Terraform environment.
+  # Centralizing this here means every other job just reads ${{ needs.resolve-env.outputs.env }}
+  # instead of repeating branch-name conditionals.
+  resolve-env:
+    name: Resolve Environment
     runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.resolve.outputs.env }}
+    steps:
+      - id: resolve
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            main)     echo "env=prod" >> "$GITHUB_OUTPUT" ;;
+            staging)  echo "env=staging" >> "$GITHUB_OUTPUT" ;;
+            develop)  echo "env=dev" >> "$GITHUB_OUTPUT" ;;
+            *)        echo "env=dev" >> "$GITHUB_OUTPUT" ;;  # PRs from feature branches plan against dev
+          esac
+
+  plan:
+    name: Terraform Plan (${{ needs.resolve-env.outputs.env }})
+    runs-on: ubuntu-latest
+    needs: resolve-env
     outputs:
       plan_exitcode: ${{ steps.plan.outputs.exitcode }}
     steps:
@@ -38,26 +62,26 @@ jobs:
           terraform_version: "1.9.0"
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -backend-config=environments/backend-${{ needs.resolve-env.outputs.env }}.hcl
 
       - name: Terraform Validate
         run: terraform validate
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -out=tfplan -input=false
+        run: terraform plan -var-file=environments/${{ needs.resolve-env.outputs.env }}.tfvars -out=tfplan -input=false
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan
+          name: tfplan-${{ needs.resolve-env.outputs.env }}
           path: tfplan
           retention-days: 1
 
   tfsec-scan:
     name: tfsec Security Scan
     runs-on: ubuntu-latest
-    needs: plan
+    needs: [resolve-env, plan]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -70,12 +94,17 @@ jobs:
         run: |
           tfsec . --exclude aws-ec2-no-public-ingress-sgr,aws-ec2-no-public-egress-sgr,aws-elb-http-not-used,aws-ec2-no-public-ip-subnet,aws-elb-alb-not-public,aws-ec2-require-vpc-flow-logs-for-all-vpcs,aws-rds-enable-performance-insights-encryption,aws-sns-topic-encryption-use-cmk,builtin.aws.rds.aws0177
 
-
   apply:
-    name: Terraform Apply
+    name: Terraform Apply (${{ needs.resolve-env.outputs.env }})
     runs-on: ubuntu-latest
-    needs: [plan, tfsec-scan]
-    environment: production
+    needs: [resolve-env, plan, tfsec-scan]
+    # Only apply on a direct push to one of the three tracked branches, never on a PR.
+    if: github.event_name == 'push'
+    # Manual-approval gate ONLY for prod. The "dev" and "staging" GitHub
+    # Environments below have no required reviewers configured, so those
+    # runs proceed straight through (auto-apply). "production" keeps the
+    # required-reviewer rule that was already set up in Phase 9.
+    environment: ${{ needs.resolve-env.outputs.env == 'prod' && 'production' || needs.resolve-env.outputs.env }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -92,12 +121,12 @@ jobs:
           terraform_version: "1.9.0"
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -backend-config=environments/backend-${{ needs.resolve-env.outputs.env }}.hcl
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
         with:
-          name: tfplan
+          name: tfplan-${{ needs.resolve-env.outputs.env }}
 
       - name: Terraform Apply
         run: terraform apply -input=false tfplan

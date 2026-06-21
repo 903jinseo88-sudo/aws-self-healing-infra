@@ -3,7 +3,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "aws-self-healing-infra-igw"
+    Name = "${local.name_prefix}-igw"
   }
 }
 
@@ -12,12 +12,12 @@ resource "aws_internet_gateway" "main" {
 # Required so the ALB (in this public subnet) is internet-reachable.
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 1)
   availability_zone       = "ap-southeast-1a"
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "public-subnet-a"
+    Name = "${local.name_prefix}-public-a"
   }
 }
 
@@ -25,33 +25,33 @@ resource "aws_subnet" "public_a" {
 # Required so the ALB (in this public subnet) is internet-reachable.
 resource "aws_subnet" "public_b" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.2.0/24"
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 2)
   availability_zone       = "ap-southeast-1b"
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "public-subnet-b"
+    Name = "${local.name_prefix}-public-b"
   }
 }
 
 # Private Subnets
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.11.0/24"
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 11)
   availability_zone = "ap-southeast-1a"
 
   tags = {
-    Name = "private-subnet-a"
+    Name = "${local.name_prefix}-private-a"
   }
 }
 
 resource "aws_subnet" "private_b" {
   vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.12.0/24"
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 12)
   availability_zone = "ap-southeast-1b"
 
   tags = {
-    Name = "private-subnet-b"
+    Name = "${local.name_prefix}-private-b"
   }
 }
 
@@ -65,7 +65,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "public-route-table"
+    Name = "${local.name_prefix}-public-rt"
   }
 }
 
@@ -84,7 +84,7 @@ resource "aws_eip" "nat" {
   domain = "vpc"
 
   tags = {
-    Name = "nat-eip"
+    Name = "${local.name_prefix}-nat-eip"
   }
 }
 
@@ -93,7 +93,7 @@ resource "aws_nat_gateway" "main" {
   subnet_id     = aws_subnet.public_a.id
 
   tags = {
-    Name = "main-nat-gateway"
+    Name = "${local.name_prefix}-nat-gw"
   }
 
   depends_on = [aws_internet_gateway.main]
@@ -109,7 +109,7 @@ resource "aws_route_table" "private" {
   }
 
   tags = {
-    Name = "private-route-table"
+    Name = "${local.name_prefix}-private-rt"
   }
 }
 
@@ -126,18 +126,20 @@ resource "aws_route_table_association" "private_b" {
 #tfsec:ignore:aws-ec2-require-vpc-flow-logs-for-all-vpcs
 # Flow Logs would add ongoing CloudWatch Logs cost; out of scope for this portfolio demo.
 resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
+  cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
 
   tags = {
-    Name = "aws-self-healing-infra-vpc"
+    Name = "${local.name_prefix}-vpc"
   }
 }
 
 # Security Group for ALB
 resource "aws_security_group" "alb" {
-  name        = "alb-sg"
+  # name forces replacement on change -> keep prod's original literal name
+  # untouched so this refactor doesn't recreate the live SG.
+  name        = var.environment == "prod" ? "alb-sg" : "${local.name_prefix}-alb-sg"
   description = "Allow HTTP traffic to ALB"
   vpc_id      = aws_vpc.main.id
 
@@ -161,13 +163,13 @@ resource "aws_security_group" "alb" {
   }
 
   tags = {
-    Name = "alb-sg"
+    Name = "${local.name_prefix}-alb-sg"
   }
 }
 
 # Security Group for EC2
 resource "aws_security_group" "ec2" {
-  name        = "ec2-sg"
+  name        = var.environment == "prod" ? "ec2-sg" : "${local.name_prefix}-ec2-sg"
   description = "Allow HTTP from ALB only"
   vpc_id      = aws_vpc.main.id
 
@@ -190,7 +192,7 @@ resource "aws_security_group" "ec2" {
   }
 
   tags = {
-    Name = "ec2-sg"
+    Name = "${local.name_prefix}-ec2-sg"
   }
 }
 
@@ -207,9 +209,9 @@ data "aws_ami" "amazon_linux" {
 
 # Launch Template
 resource "aws_launch_template" "app" {
-  name_prefix   = "aws-self-healing-infra-"
+  name_prefix   = "${local.name_prefix}-"
   image_id      = data.aws_ami.amazon_linux.id
-  instance_type = "t3.micro"
+  instance_type = var.ec2_instance_type
 
   vpc_security_group_ids = [aws_security_group.ec2.id]
 
@@ -232,18 +234,18 @@ resource "aws_launch_template" "app" {
   tag_specifications {
     resource_type = "instance"
     tags = {
-      Name = "aws-self-healing-infra-instance"
+      Name = "${local.name_prefix}-instance"
     }
   }
 }
 
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app" {
-  name                      = "aws-self-healing-infra-asg"
+  name                      = "${local.name_prefix}-asg"
   vpc_zone_identifier       = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-  min_size                  = 2
-  max_size                  = 4
-  desired_capacity          = 2
+  min_size                  = var.asg_min_size
+  max_size                  = var.asg_max_size
+  desired_capacity          = var.asg_desired_capacity
   health_check_type         = "ELB"
   health_check_grace_period = 60
 
@@ -256,7 +258,7 @@ resource "aws_autoscaling_group" "app" {
 
   tag {
     key                 = "Name"
-    value               = "aws-self-healing-infra-asg-instance"
+    value               = "${local.name_prefix}-asg-instance"
     propagate_at_launch = true
   }
 }
@@ -266,10 +268,10 @@ resource "aws_autoscaling_group" "app" {
 data "aws_caller_identity" "current" {}
 
 resource "aws_s3_bucket" "alb_logs" {
-  bucket = "aws-self-healing-infra-alb-logs-${data.aws_caller_identity.current.account_id}"
+  bucket = "${local.name_prefix}-alb-logs-${data.aws_caller_identity.current.account_id}"
 
   tags = {
-    Name = "aws-self-healing-infra-alb-logs"
+    Name = "${local.name_prefix}-alb-logs"
   }
 }
 
@@ -338,7 +340,7 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 #tfsec:ignore:aws-elb-alb-not-public
 # Portfolio demo: ALB is intentionally public-facing to serve the web app.
 resource "aws_lb" "app" {
-  name                       = "aws-self-healing-infra-alb"
+  name                       = "${local.name_prefix}-alb"
   internal                   = false
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
@@ -354,13 +356,13 @@ resource "aws_lb" "app" {
   depends_on = [aws_s3_bucket_policy.alb_logs]
 
   tags = {
-    Name = "aws-self-healing-infra-alb"
+    Name = "${local.name_prefix}-alb"
   }
 }
 
 # Target Group
 resource "aws_lb_target_group" "app" {
-  name     = "aws-self-healing-infra-tg"
+  name     = "${local.name_prefix}-tg"
   port     = 80
   protocol = "HTTP"
   vpc_id   = aws_vpc.main.id
@@ -374,7 +376,7 @@ resource "aws_lb_target_group" "app" {
   }
 
   tags = {
-    Name = "aws-self-healing-infra-tg"
+    Name = "${local.name_prefix}-tg"
   }
 }
 
@@ -395,7 +397,7 @@ resource "aws_lb_listener" "app" {
 
 # Security Group for RDS
 resource "aws_security_group" "rds" {
-  name        = "rds-sg"
+  name        = var.environment == "prod" ? "rds-sg" : "${local.name_prefix}-rds-sg"
   description = "Allow MySQL access from EC2 only"
   vpc_id      = aws_vpc.main.id
 
@@ -418,27 +420,27 @@ resource "aws_security_group" "rds" {
   }
 
   tags = {
-    Name = "rds-sg"
+    Name = "${local.name_prefix}-rds-sg"
   }
 }
 
 # DB Subnet Group
 resource "aws_db_subnet_group" "main" {
-  name       = "aws-self-healing-infra-db-subnet-group"
+  name       = "${local.name_prefix}-db-subnet-group"
   subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
 
   tags = {
-    Name = "aws-self-healing-infra-db-subnet-group"
+    Name = "${local.name_prefix}-db-subnet-group"
   }
 }
 
 # RDS Instance
 resource "aws_db_instance" "main" {
-  identifier                          = "aws-self-healing-infra-db"
+  identifier                          = "${local.name_prefix}-db"
   engine                              = "mysql"
   engine_version                      = "8.0"
-  instance_class                      = "db.t3.micro"
-  allocated_storage                   = 20
+  instance_class                      = var.db_instance_class
+  allocated_storage                   = var.db_allocated_storage
   storage_type                        = "gp3"
   storage_encrypted                   = true
   iam_database_authentication_enabled = true
@@ -458,14 +460,14 @@ resource "aws_db_instance" "main" {
   deletion_protection          = true
 
   tags = {
-    Name = "aws-self-healing-infra-db"
+    Name = "${local.name_prefix}-db"
   }
 }
 
 # SNS Topic for alerts
 #tfsec:ignore:aws-sns-topic-encryption-use-cmk
 resource "aws_sns_topic" "alerts" {
-  name              = "aws-self-healing-infra-alerts"
+  name              = "${local.name_prefix}-alerts"
   kms_master_key_id = aws_kms_alias.sns.target_key_id
 }
 
@@ -477,7 +479,7 @@ resource "aws_sns_topic_subscription" "email" {
 
 # CloudWatch Alarm: Unhealthy hosts on the ALB Target Group
 resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
-  alarm_name          = "aws-self-healing-infra-unhealthy-hosts"
+  alarm_name          = "${local.name_prefix}-unhealthy-hosts"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "UnHealthyHostCount"
@@ -498,7 +500,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
 
 # CloudWatch Alarm: ASG scaling activity (informational)
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  alarm_name          = "aws-self-healing-infra-high-cpu"
+  alarm_name          = "${local.name_prefix}-high-cpu"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "CPUUtilization"
@@ -525,7 +527,7 @@ data "archive_file" "auto_remediation" {
 }
 
 resource "aws_dynamodb_table" "remediation_cooldown" {
-  name         = "aws-self-healing-infra-remediation-cooldown"
+  name         = "${local.name_prefix}-remediation-cooldown"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "instance_id"
 
@@ -535,12 +537,12 @@ resource "aws_dynamodb_table" "remediation_cooldown" {
   }
 
   tags = {
-    Name = "aws-self-healing-infra-remediation-cooldown"
+    Name = "${local.name_prefix}-remediation-cooldown"
   }
 }
 
 resource "aws_iam_role" "lambda_remediation" {
-  name = "aws-self-healing-infra-lambda-remediation-role"
+  name = "${local.name_prefix}-lambda-remediation-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -555,7 +557,7 @@ resource "aws_iam_role" "lambda_remediation" {
 }
 
 resource "aws_iam_role_policy" "lambda_remediation" {
-  name = "aws-self-healing-infra-lambda-remediation-policy"
+  name = "${local.name_prefix}-lambda-remediation-policy"
   role = aws_iam_role.lambda_remediation.id
 
   policy = jsonencode({
@@ -619,7 +621,7 @@ resource "aws_iam_role_policy" "lambda_remediation" {
 }
 
 resource "aws_lambda_function" "auto_remediation" {
-  function_name    = "aws-self-healing-infra-auto-remediation"
+  function_name    = "${local.name_prefix}-auto-remediation"
   role             = aws_iam_role.lambda_remediation.arn
   handler          = "lambda_function.lambda_handler"
   runtime          = "python3.12"
@@ -637,7 +639,7 @@ resource "aws_lambda_function" "auto_remediation" {
   }
 
   tags = {
-    Name = "aws-self-healing-infra-auto-remediation"
+    Name = "${local.name_prefix}-auto-remediation"
   }
 }
 
@@ -659,7 +661,7 @@ resource "aws_sns_topic_subscription" "lambda_remediation" {
 # KMS Key for SNS Topic Encryption
 # -----------------------------
 resource "aws_kms_key" "sns" {
-  description             = "KMS key for SNS topic encryption (aws-self-healing-infra-alerts)"
+  description             = "KMS key for SNS topic encryption (${local.name_prefix}-alerts)"
   deletion_window_in_days = 7
 
   policy = jsonencode({
@@ -702,11 +704,11 @@ resource "aws_kms_key" "sns" {
   })
 
   tags = {
-    Name = "aws-self-healing-infra-sns-kms"
+    Name = "${local.name_prefix}-sns-kms"
   }
 }
 
 resource "aws_kms_alias" "sns" {
-  name          = "alias/aws-self-healing-infra-sns"
+  name          = "alias/${local.name_prefix}-sns"
   target_key_id = aws_kms_key.sns.key_id
 }

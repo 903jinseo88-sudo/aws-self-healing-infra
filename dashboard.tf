@@ -10,7 +10,7 @@ locals {
 data "aws_region" "current" {}
 
 resource "aws_cloudwatch_dashboard" "main" {
-  dashboard_name = "aws-self-healing-infra-dashboard"
+  dashboard_name = "${local.name_prefix}-dashboard"
 
   dashboard_body = jsonencode({
     widgets = [
@@ -118,7 +118,7 @@ resource "aws_cloudwatch_dashboard" "main" {
           stat   = "Average"
           period = 60
           metrics = [
-            ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "aws-self-healing-infra-db"]
+            ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${local.name_prefix}-db"]
           ]
         }
       },

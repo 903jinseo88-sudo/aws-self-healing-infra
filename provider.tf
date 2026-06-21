@@ -12,9 +12,12 @@ terraform {
     }
   }
 
+  # Partial backend config: bucket/region/dynamodb_table are shared across all
+  # environments, but `key` differs per environment so each gets an isolated
+  # state file. Supply `key` at `terraform init` time via -backend-config,
+  # e.g.: terraform init -backend-config=environments/backend-dev.hcl
   backend "s3" {
     bucket         = "jinseo-tf-state-aws-self-healing-infra"
-    key            = "terraform.tfstate"
     region         = "ap-southeast-1"
     dynamodb_table = "terraform-lock-aws-self-healing-infra"
     encrypt        = true
@@ -23,4 +26,8 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+
+  default_tags {
+    tags = local.common_tags
+  }
 }

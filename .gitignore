@@ -16,6 +16,12 @@ crash.*.log
 *.tfvars
 *.tfvars.json
 
+# EXCEPTION: environments/*.tfvars hold only non-secret sizing/naming values
+# (instance types, CIDR blocks, environment name). Real secrets (db_password,
+# alert_email) are injected separately via GitHub Secrets / TF_VAR_* env vars
+# in CI, never via these files. CI needs these checked in to run -var-file.
+!environments/*.tfvars
+
 # Ignore override files as they are usually used to override resources locally and so
 # are not checked in
 override.tf

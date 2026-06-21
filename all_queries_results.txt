@@ -1,0 +1,8 @@
+=== Query 3: Top Clients ===
+client_ip	user_agent	request_count	203.217.187.32	curl/8.7.1	20
+
+=== Query 4: 4xx vs 5xx ===
+status_category	count	2xx	20
+
+=== Query 5: Avg Latency by URL ===
+request_url	request_count	avg_latency_sec	max_latency_sec	http://aws-self-healing-infra-alb-1009996421.ap-southeast-1.elb.amazonaws.com:80/	20	0.0011	0.007
