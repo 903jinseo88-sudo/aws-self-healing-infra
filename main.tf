@@ -12,9 +12,9 @@ resource "aws_internet_gateway" "main" {
 # Required so the ALB (in this public subnet) is internet-reachable.
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block               = "10.0.1.0/24"
-  availability_zone        = "ap-southeast-1a"
-  map_public_ip_on_launch  = true
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "ap-southeast-1a"
+  map_public_ip_on_launch = true
 
   tags = {
     Name = "public-subnet-a"
@@ -25,9 +25,9 @@ resource "aws_subnet" "public_a" {
 # Required so the ALB (in this public subnet) is internet-reachable.
 resource "aws_subnet" "public_b" {
   vpc_id                  = aws_vpc.main.id
-  cidr_block               = "10.0.2.0/24"
-  availability_zone        = "ap-southeast-1b"
-  map_public_ip_on_launch  = true
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "ap-southeast-1b"
+  map_public_ip_on_launch = true
 
   tags = {
     Name = "public-subnet-b"
@@ -37,8 +37,8 @@ resource "aws_subnet" "public_b" {
 # Private Subnets
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
-  cidr_block         = "10.0.11.0/24"
-  availability_zone  = "ap-southeast-1a"
+  cidr_block        = "10.0.11.0/24"
+  availability_zone = "ap-southeast-1a"
 
   tags = {
     Name = "private-subnet-a"
@@ -47,8 +47,8 @@ resource "aws_subnet" "private_a" {
 
 resource "aws_subnet" "private_b" {
   vpc_id            = aws_vpc.main.id
-  cidr_block         = "10.0.12.0/24"
-  availability_zone  = "ap-southeast-1b"
+  cidr_block        = "10.0.12.0/24"
+  availability_zone = "ap-southeast-1b"
 
   tags = {
     Name = "private-subnet-b"
@@ -173,10 +173,10 @@ resource "aws_security_group" "ec2" {
 
   ingress {
     description     = "HTTP from ALB"
-    from_port        = 80
-    to_port          = 80
-    protocol         = "tcp"
-    security_groups  = [aws_security_group.alb.id]
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
   #tfsec:ignore:aws-ec2-no-public-egress-sgr
@@ -239,12 +239,12 @@ resource "aws_launch_template" "app" {
 
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app" {
-  name                = "aws-self-healing-infra-asg"
-  vpc_zone_identifier = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-  min_size            = 2
-  max_size            = 4
-  desired_capacity    = 2
-  health_check_type   = "ELB"
+  name                      = "aws-self-healing-infra-asg"
+  vpc_zone_identifier       = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  min_size                  = 2
+  max_size                  = 4
+  desired_capacity          = 2
+  health_check_type         = "ELB"
   health_check_grace_period = 60
 
   launch_template {
@@ -260,6 +260,79 @@ resource "aws_autoscaling_group" "app" {
     propagate_at_launch = true
   }
 }
+# -----------------------------
+# ALB Access Logs - S3 Bucket
+# -----------------------------
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket" "alb_logs" {
+  bucket = "aws-self-healing-infra-alb-logs-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Name = "aws-self-healing-infra-alb-logs"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  rule {
+    id     = "expire-old-logs"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 30
+    }
+  }
+}
+
+locals {
+  elb_account_id_ap_southeast_1 = "114774131450"
+}
+
+resource "aws_s3_bucket_policy" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowELBLogDelivery"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${local.elb_account_id_ap_southeast_1}:root"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.alb_logs.arn}/alb-logs/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+      },
+      {
+        Sid    = "AllowELBLogDeliveryService"
+        Effect = "Allow"
+        Principal = {
+          Service = "delivery.logs.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.alb_logs.arn}/alb-logs/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl" = "bucket-owner-full-control"
+          }
+        }
+      }
+    ]
+  })
+}
 
 # Application Load Balancer
 #tfsec:ignore:aws-elb-alb-not-public
@@ -271,6 +344,14 @@ resource "aws_lb" "app" {
   security_groups            = [aws_security_group.alb.id]
   subnets                    = [aws_subnet.public_a.id, aws_subnet.public_b.id]
   drop_invalid_header_fields = true
+
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs.id
+    prefix  = "alb-logs"
+    enabled = true
+  }
+
+  depends_on = [aws_s3_bucket_policy.alb_logs]
 
   tags = {
     Name = "aws-self-healing-infra-alb"
@@ -320,10 +401,10 @@ resource "aws_security_group" "rds" {
 
   ingress {
     description     = "MySQL from EC2"
-    from_port        = 3306
-    to_port          = 3306
-    protocol         = "tcp"
-    security_groups  = [aws_security_group.ec2.id]
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ec2.id]
   }
 
   #tfsec:ignore:aws-ec2-no-public-egress-sgr
@@ -353,28 +434,28 @@ resource "aws_db_subnet_group" "main" {
 
 # RDS Instance
 resource "aws_db_instance" "main" {
-  identifier             = "aws-self-healing-infra-db"
-  engine                 = "mysql"
-  engine_version         = "8.0"
-  instance_class         = "db.t3.micro"
-  allocated_storage      = 20
-  storage_type           = "gp3"
-  storage_encrypted      = true
+  identifier                          = "aws-self-healing-infra-db"
+  engine                              = "mysql"
+  engine_version                      = "8.0"
+  instance_class                      = "db.t3.micro"
+  allocated_storage                   = 20
+  storage_type                        = "gp3"
+  storage_encrypted                   = true
   iam_database_authentication_enabled = true
 
-  db_name                = "appdb"
-  username               = "admin"
-  password               = var.db_password
+  db_name  = "appdb"
+  username = "admin"
+  password = var.db_password
 
   vpc_security_group_ids = [aws_security_group.rds.id]
   db_subnet_group_name   = aws_db_subnet_group.main.name
 
-  multi_az                      = false
-  publicly_accessible           = false
-  skip_final_snapshot           = true
-  backup_retention_period       = 7
-  performance_insights_enabled  = true
-  deletion_protection		= true
+  multi_az                     = false
+  publicly_accessible          = false
+  skip_final_snapshot          = true
+  backup_retention_period      = 1
+  performance_insights_enabled = false
+  deletion_protection          = true
 
   tags = {
     Name = "aws-self-healing-infra-db"
@@ -385,7 +466,7 @@ resource "aws_db_instance" "main" {
 #tfsec:ignore:aws-sns-topic-encryption-use-cmk
 resource "aws_sns_topic" "alerts" {
   name              = "aws-self-healing-infra-alerts"
-  kms_master_key_id = "alias/aws/sns"
+  kms_master_key_id = aws_kms_alias.sns.target_key_id
 }
 
 resource "aws_sns_topic_subscription" "email" {
@@ -411,8 +492,8 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   }
 
   alarm_description = "Triggers when one or more EC2 instances behind the ALB become unhealthy"
-  alarm_actions      = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
+  alarm_actions     = [aws_sns_topic.alerts.arn]
+  ok_actions        = [aws_sns_topic.alerts.arn]
 }
 
 # CloudWatch Alarm: ASG scaling activity (informational)
@@ -431,5 +512,201 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   }
 
   alarm_description = "Triggers when average CPU utilization across the ASG exceeds 70%"
-  alarm_actions      = [aws_sns_topic.alerts.arn]
+  alarm_actions     = [aws_sns_topic.alerts.arn]
+}
+
+# -----------------------------
+# Lambda Auto-Remediation
+# -----------------------------
+data "archive_file" "auto_remediation" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/auto_remediation/lambda_function.py"
+  output_path = "${path.module}/lambda/auto_remediation.zip"
+}
+
+resource "aws_dynamodb_table" "remediation_cooldown" {
+  name         = "aws-self-healing-infra-remediation-cooldown"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "instance_id"
+
+  attribute {
+    name = "instance_id"
+    type = "S"
+  }
+
+  tags = {
+    Name = "aws-self-healing-infra-remediation-cooldown"
+  }
+}
+
+resource "aws_iam_role" "lambda_remediation" {
+  name = "aws-self-healing-infra-lambda-remediation-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_remediation" {
+  name = "aws-self-healing-infra-lambda-remediation-policy"
+  role = aws_iam_role.lambda_remediation.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EC2Reboot"
+        Effect = "Allow"
+        Action = [
+          "ec2:RebootInstances",
+          "ec2:DescribeInstanceStatus"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "ELBDescribe"
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:DescribeTargetHealth"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "DynamoDBCooldown"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem"
+        ]
+        Resource = aws_dynamodb_table.remediation_cooldown.arn
+      },
+      {
+        Sid    = "SNSPublish"
+        Effect = "Allow"
+        Action = [
+          "sns:Publish"
+        ]
+        Resource = aws_sns_topic.alerts.arn
+      },
+      {
+        Sid    = "KMSForSNS"
+        Effect = "Allow"
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ]
+        Resource = aws_kms_key.sns.arn
+      },
+      {
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:ap-southeast-1:${data.aws_caller_identity.current.account_id}:*"
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "auto_remediation" {
+  function_name    = "aws-self-healing-infra-auto-remediation"
+  role             = aws_iam_role.lambda_remediation.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  timeout          = 30
+  filename         = data.archive_file.auto_remediation.output_path
+  source_code_hash = data.archive_file.auto_remediation.output_base64sha256
+
+  environment {
+    variables = {
+      COOLDOWN_TABLE   = aws_dynamodb_table.remediation_cooldown.name
+      TARGET_GROUP_ARN = aws_lb_target_group.app.arn
+      SNS_TOPIC_ARN    = aws_sns_topic.alerts.arn
+      COOLDOWN_MINUTES = "10"
+    }
+  }
+
+  tags = {
+    Name = "aws-self-healing-infra-auto-remediation"
+  }
+}
+
+resource "aws_lambda_permission" "allow_sns" {
+  statement_id  = "AllowSNSInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.auto_remediation.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.alerts.arn
+}
+
+resource "aws_sns_topic_subscription" "lambda_remediation" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.auto_remediation.arn
+}
+
+# -----------------------------
+# KMS Key for SNS Topic Encryption
+# -----------------------------
+resource "aws_kms_key" "sns" {
+  description             = "KMS key for SNS topic encryption (aws-self-healing-infra-alerts)"
+  deletion_window_in_days = 7
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EnableRootAccountAccess"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowCloudWatchAlarmsToUseKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudwatch.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowSNSServiceToUseKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "sns.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "aws-self-healing-infra-sns-kms"
+  }
+}
+
+resource "aws_kms_alias" "sns" {
+  name          = "alias/aws-self-healing-infra-sns"
+  target_key_id = aws_kms_key.sns.key_id
 }
