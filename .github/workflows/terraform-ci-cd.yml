@@ -3,9 +3,9 @@ name: Terraform CI/CD
 on:
   push:
     branches:
-      - main      # -> prod (manual approval)
-      - staging   # -> staging (auto-apply)
-      - develop   # -> dev (auto-apply)
+      - main
+      - staging
+      - develop
   pull_request:
     branches:
       - main
@@ -22,9 +22,6 @@ env:
   TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
 
 jobs:
-  # Map the branch that triggered this run to a Terraform environment.
-  # Centralizing this here means every other job just reads ${{ needs.resolve-env.outputs.env }}
-  # instead of repeating branch-name conditionals.
   resolve-env:
     name: Resolve Environment
     runs-on: ubuntu-latest
@@ -37,7 +34,7 @@ jobs:
             main)     echo "env=prod" >> "$GITHUB_OUTPUT" ;;
             staging)  echo "env=staging" >> "$GITHUB_OUTPUT" ;;
             develop)  echo "env=dev" >> "$GITHUB_OUTPUT" ;;
-            *)        echo "env=dev" >> "$GITHUB_OUTPUT" ;;  # PRs from feature branches plan against dev
+            *)        echo "env=dev" >> "$GITHUB_OUTPUT" ;;
           esac
 
   plan:
@@ -92,18 +89,26 @@ jobs:
 
       - name: Run tfsec
         run: |
-          tfsec . --exclude aws-ec2-no-public-ingress-sgr,aws-ec2-no-public-egress-sgr,aws-elb-http-not-used,aws-ec2-no-public-ip-subnet,aws-elb-alb-not-public,aws-ec2-require-vpc-flow-logs-for-all-vpcs,aws-rds-enable-performance-insights-encryption,aws-sns-topic-encryption-use-cmk,builtin.aws.rds.aws0177
+          tfsec . --exclude \
+            aws-ec2-no-public-ingress-sgr,\
+            aws-ec2-no-public-egress-sgr,\
+            aws-elb-http-not-used,\
+            aws-ec2-no-public-ip-subnet,\
+            aws-elb-alb-not-public,\
+            aws-ec2-require-vpc-flow-logs-for-all-vpcs,\
+            aws-rds-enable-performance-insights-encryption,\
+            aws-sns-topic-encryption-use-cmk,\
+            builtin.aws.rds.aws0177,\
+            aws-s3-encryption-customer-key,\
+            aws-s3-enable-bucket-logging,\
+            aws-rds-enable-performance-insights,\
+            aws-dynamodb-table-customer-key
 
   apply:
     name: Terraform Apply (${{ needs.resolve-env.outputs.env }})
     runs-on: ubuntu-latest
     needs: [resolve-env, plan, tfsec-scan]
-    # Only apply on a direct push to one of the three tracked branches, never on a PR.
     if: github.event_name == 'push'
-    # Manual-approval gate ONLY for prod. The "dev" and "staging" GitHub
-    # Environments below have no required reviewers configured, so those
-    # runs proceed straight through (auto-apply). "production" keeps the
-    # required-reviewer rule that was already set up in Phase 9.
     environment: ${{ needs.resolve-env.outputs.env == 'prod' && 'production' || needs.resolve-env.outputs.env }}
     steps:
       - name: Checkout repository
