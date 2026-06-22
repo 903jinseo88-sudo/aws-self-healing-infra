@@ -88,21 +88,7 @@ jobs:
           curl -s -L https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
 
       - name: Run tfsec
-        run: |
-          tfsec . --exclude \
-            aws-ec2-no-public-ingress-sgr,\
-            aws-ec2-no-public-egress-sgr,\
-            aws-elb-http-not-used,\
-            aws-ec2-no-public-ip-subnet,\
-            aws-elb-alb-not-public,\
-            aws-ec2-require-vpc-flow-logs-for-all-vpcs,\
-            aws-rds-enable-performance-insights-encryption,\
-            aws-sns-topic-encryption-use-cmk,\
-            builtin.aws.rds.aws0177,\
-            aws-s3-encryption-customer-key,\
-            aws-s3-enable-bucket-logging,\
-            aws-rds-enable-performance-insights,\
-            aws-dynamodb-table-customer-key
+        run: tfsec . --exclude aws-ec2-no-public-ingress-sgr,aws-ec2-no-public-egress-sgr,aws-elb-http-not-used,aws-ec2-no-public-ip-subnet,aws-elb-alb-not-public,aws-ec2-require-vpc-flow-logs-for-all-vpcs,aws-rds-enable-performance-insights-encryption,aws-sns-topic-encryption-use-cmk,builtin.aws.rds.aws0177,aws-s3-encryption-customer-key,aws-s3-enable-bucket-logging,aws-rds-enable-performance-insights,aws-dynamodb-table-customer-key
 
   apply:
     name: Terraform Apply (${{ needs.resolve-env.outputs.env }})
